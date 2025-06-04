@@ -73,6 +73,7 @@
                 const serviceId = serviceInput ? parseInt(serviceInput.value) : null;
                 
                 if (!serviceId) {
+                    console.warn('No service_id found');
                     return;
                 }
 
@@ -89,6 +90,7 @@
                     .lte('date', endDate.toISOString().split('T')[0]);
 
                 if (error) {
+                    console.error('Supabase error:', error);
                     return;
                 }
 
@@ -99,7 +101,11 @@
                     this.data.supabasePrices[formattedDate] = item.price;
                 });
 
+                console.log(`Loaded ${Object.keys(this.data.supabasePrices).length} dates from Supabase for service ${serviceId}`);
+                console.log('Sample dates:', Object.entries(this.data.supabasePrices).slice(0, 5));
+
             } catch (error) {
+                console.error('Error loading prices:', error);
             } finally {
                 const loadingEl = document.getElementById('loading');
                 if (loadingEl) loadingEl.style.display = 'none';
@@ -357,13 +363,23 @@
             const stored = localStorage.getItem(`monthData-${monthKey}`);
             const blocked = localStorage.getItem('blockedDatesMap');
             
-            if (stored) {
-                this.data.basePrices[monthKey] = JSON.parse(stored);
+            if (stored && stored !== 'undefined') {
+                try {
+                    this.data.basePrices[monthKey] = JSON.parse(stored);
+                } catch (e) {
+                    this.data.basePrices[monthKey] = {prices: [], defaultCost: this.getDefaultCost()};
+                }
             } else {
                 this.data.basePrices[monthKey] = {prices: [], defaultCost: this.getDefaultCost()};
             }
             
-            if (blocked) this.data.blockedDates = JSON.parse(blocked);
+            if (blocked && blocked !== 'undefined') {
+                try {
+                    this.data.blockedDates = JSON.parse(blocked);
+                } catch (e) {
+                    this.data.blockedDates = {};
+                }
+            }
             
             this.ensureBasePrices(monthKey);
             
@@ -783,6 +799,8 @@
 
         attachDaySelectionHandlers() {
             document.addEventListener('click', (event) => {
+                if (!event.target) return;
+                
                 const dayWrapper = event.target.closest('.calendar_day-wrapper');
                 if (!dayWrapper || dayWrapper.classList.contains('not_exist')) return;
 
@@ -862,6 +880,8 @@
             });
 
             document.addEventListener('mouseover', (event) => {
+                if (!event.target) return;
+                
                 const dayWrapper = event.target.closest('.calendar_day-wrapper');
                 if (!dayWrapper || !this.selection.tempStart || dayWrapper.classList.contains('not_exist') || 
                     dayWrapper.classList.contains('is-past') || dayWrapper.classList.contains('is-blocked')) return;
@@ -906,6 +926,7 @@
             });
 
             document.addEventListener('mouseleave', (event) => {
+                if (!event.target || !event.target.closest) return;
                 if (!event.target.closest('.calendar_wrap')) return;
                 this.clearHoverState();
             });
