@@ -7,7 +7,8 @@ class CalendarManager {
             dateRanges: [],
             excludedDays: new Set(),
             dateDiscounts: {},
-            globalSettings: {defaultCost: 8000}
+            globalSettings: {defaultCost: 8000},
+            loadedFromDB: {} // Для хранения данных из БД
         };
         this.selection = {
             tempStart: null,
@@ -22,30 +23,31 @@ class CalendarManager {
             'September':'09','October':'10','November':'11','December':'12'
         };
         this.reverseMonthMap = Object.fromEntries(Object.entries(this.monthMap).map(([k,v])=>[v,k]));
-        
-        // Supabase configuration
-        this.supabaseClient = null;
-        this.serviceId = null;
-        this.dbCalendarData = new Map(); // Store calendar data from DB
-        this.isEditMode = false;
-        
+        this.serviceId = null; // Will be set from the other script
+        this.supabaseClient = null; // Will be initialized if available
         this.init();
     }
 
-    init() {
+    async init() {
         this.addStyles();
         this.setCurrentDate();
         
-        // Initialize Supabase and detect edit mode
-        this.initializeSupabase();
-        this.detectEditMode();
+        // Initialize Supabase if available
+        if (typeof supabase !== "undefined") {
+            const SUPABASE_URL = 'https://jymaupdlljtwjxiiistn.supabase.co';
+            const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp5bWF1cGRsbGp0d2p4aWlpc3RuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Mzg5MTcxMTgsImV4cCI6MjA1NDQ5MzExOH0.3K22PNYIHh8NCreiG0NBtn6ITFrL3cVmSS5KCG--niY';
+            this.supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        }
+        
+        // Try to get service ID from URL or form
+        this.serviceId = this.getServiceId();
         
         setTimeout(async () => {
             this.loadGlobalSettings();
             
-            // Load calendar data if in edit mode
-            if (this.isEditMode && this.supabaseClient && this.serviceId) {
-                await this.loadCalendarFromDB();
+            // If we have a service ID and Supabase, load data from DB
+            if (this.serviceId && this.supabaseClient) {
+                await this.loadDataFromDB();
             }
             
             this.updateCalendar();
@@ -68,212 +70,250 @@ class CalendarManager {
                     }
                 }
             }
-            
-            // Enable price editing if in edit mode
-            if (this.isEditMode) {
-                this.enablePriceEditing();
-                console.log('Calendar in edit mode - price editing enabled. Double-click on prices to edit.');
-            }
         }, 100);
     }
 
-    initializeSupabase() {
-        if (typeof supabase === "undefined") {
-            console.warn('Supabase not available');
-            return;
-        }
-
-        try {
-            const SUPABASE_URL = 'https://jymaupdlljtwjxiiistn.supabase.co';
-            const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp5bWF1cGRsbGp0d2p4aWlpc3RuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Mzg5MTcxMTgsImV4cCI6MjA1NDQ5MzExOH0.3K22PNYIHh8NCreiG0NBtn6ITFrL3cVmSS5KCG--niY';
-            this.supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-        } catch (error) {
-            console.error('Error initializing Supabase:', error);
-        }
-    }
-
-    detectEditMode() {
-        // Try to detect service ID from URL parameters or form
+    getServiceId() {
+        // Try to get from URL
         const urlParams = new URLSearchParams(window.location.search);
-        this.serviceId = urlParams.get('service_id') || urlParams.get('id');
+        const idFromUrl = urlParams.get('service_id') || urlParams.get('id');
+        if (idFromUrl) return idFromUrl;
         
-        // Alternative: look for hidden input with service ID
-        if (!this.serviceId) {
-            const serviceIdInput = document.querySelector('input[name="service_id"], input[name="id"]');
-            if (serviceIdInput && serviceIdInput.value) {
-                this.serviceId = serviceIdInput.value;
-            }
+        // Try to get from a hidden input or data attribute
+        const serviceIdInput = document.querySelector('input[name="service_id"], input[name="id"], [data-service-id]');
+        if (serviceIdInput) {
+            return serviceIdInput.value || serviceIdInput.dataset.serviceId;
         }
-
-        // Alternative: check if we're on edit page based on URL
-        if (!this.serviceId && window.location.href.includes('/edit')) {
-            // Extract ID from URL path like /services/edit/1181
-            const pathParts = window.location.pathname.split('/');
-            const editIndex = pathParts.indexOf('edit');
-            if (editIndex !== -1 && pathParts[editIndex + 1]) {
-                this.serviceId = pathParts[editIndex + 1];
-            }
-        }
-
-        this.isEditMode = !!this.serviceId;
-        console.log('Edit mode:', this.isEditMode, 'Service ID:', this.serviceId);
+        
+        // Try to get from global variable if set by another script
+        if (window.currentServiceId) return window.currentServiceId;
+        
+        return null;
     }
 
-    async loadCalendarFromDB() {
-        if (!this.supabaseClient || !this.serviceId) {
-            console.log('Cannot load from DB: missing Supabase client or service ID');
-            return;
-        }
-
+    async loadDataFromDB() {
+        if (!this.serviceId || !this.supabaseClient) return;
+        
         try {
             console.log('Loading calendar data for service:', this.serviceId);
             
             const { data, error } = await this.supabaseClient
-                .from('calendar_data')
+                .from('available_periods')
                 .select('*')
                 .eq('service_id', this.serviceId)
                 .order('date', { ascending: true });
-
+            
             if (error) {
                 console.error('Error loading calendar data:', error);
                 return;
             }
-
-            if (data && data.length > 0) {
-                console.log('Loaded calendar data:', data);
-                
-                // Clear existing data
-                this.dbCalendarData.clear();
-                this.data.blockedDates = {};
-                
-                // Process each calendar entry
-                data.forEach(entry => {
-                    const dateKey = entry.date; // format: 2025-06-01
-                    const price = entry.price || 0;
-                    
-                    // Store in our map for quick access
-                    this.dbCalendarData.set(dateKey, {
-                        price: price,
-                        isBlocked: price === 0,
-                        originalEntry: entry
-                    });
-                    
-                    // Convert date format for compatibility with existing code
-                    const [year, month, day] = dateKey.split('-');
-                    const dateStr = this.formatDate(parseInt(day), month, year);
-                    const monthKey = `${year}-${month}`;
-                    
-                    // Initialize month data if needed
-                    if (!this.data.basePrices[monthKey]) {
-                        this.data.basePrices[monthKey] = {
-                            prices: [],
-                            defaultCost: this.getDefaultCost()
-                        };
-                    }
-                    
-                    // Add to base prices
-                    const existingIndex = this.data.basePrices[monthKey].prices.findIndex(p => p.date === dateStr);
-                    if (existingIndex !== -1) {
-                        this.data.basePrices[monthKey].prices[existingIndex].price = price;
-                    } else {
-                        this.data.basePrices[monthKey].prices.push({
-                            date: dateStr,
-                            price: price
-                        });
-                    }
-                    
-                    // Handle blocked dates
-                    if (price === 0) {
-                        if (!this.data.blockedDates[monthKey]) {
-                            this.data.blockedDates[monthKey] = [];
-                        }
-                        const existingBlock = this.data.blockedDates[monthKey].find(item => {
-                            return (typeof item === 'object' && item.date) ? item.date === dateStr : item === dateStr;
-                        });
-                        if (!existingBlock) {
-                            this.data.blockedDates[monthKey].push({
-                                date: dateStr,
-                                price: 0
-                            });
-                        }
-                    }
-                });
-                
-                console.log('Processed calendar data:', {
-                    dbData: this.dbCalendarData,
-                    basePrices: this.data.basePrices,
-                    blockedDates: this.data.blockedDates
-                });
+            
+            if (!data || data.length === 0) {
+                console.log('No calendar data found for this service');
+                return;
             }
+            
+            // Process the loaded data
+            this.processDBData(data);
+            
+            // Update the cost input if found
+            const costInput = document.querySelector('input[name="cost_per_show"]');
+            if (costInput && data.length > 0) {
+                // Find the most common non-zero price as default
+                const prices = data.filter(d => d.price > 0).map(d => d.price);
+                if (prices.length > 0) {
+                    const mostCommonPrice = this.getMostCommonValue(prices);
+                    costInput.value = mostCommonPrice;
+                    this.data.globalSettings.defaultCost = mostCommonPrice;
+                }
+            }
+            
+            console.log('Calendar data loaded successfully');
         } catch (error) {
-            console.error('Error in loadCalendarFromDB:', error);
+            console.error('Error in loadDataFromDB:', error);
         }
     }
 
-    async saveCalendarToDB() {
-        if (!this.supabaseClient || !this.serviceId) {
-            console.log('Cannot save to DB: missing Supabase client or service ID');
-            return;
-        }
+    getMostCommonValue(arr) {
+        const frequency = {};
+        let maxFreq = 0;
+        let mostCommon = arr[0];
+        
+        arr.forEach(value => {
+            frequency[value] = (frequency[value] || 0) + 1;
+            if (frequency[value] > maxFreq) {
+                maxFreq = frequency[value];
+                mostCommon = value;
+            }
+        });
+        
+        return mostCommon;
+    }
 
-        try {
-            // Collect all calendar data to save
-            const calendarEntries = [];
+    processDBData(dbData) {
+        // Group data by month for efficient processing
+        dbData.forEach(record => {
+            const date = new Date(record.date);
+            const year = date.getFullYear();
+            const month = (date.getMonth() + 1).toString().padStart(2, '0');
+            const day = date.getDate();
+            const monthKey = `${year}-${month}`;
+            const dateStr = this.formatDate(day, month, year);
             
-            // Process all months with data
+            // Initialize month data if not exists
+            if (!this.data.basePrices[monthKey]) {
+                this.data.basePrices[monthKey] = {
+                    prices: [],
+                    defaultCost: this.getDefaultCost()
+                };
+            }
+            
+            // Add price data
+            this.data.basePrices[monthKey].prices.push({
+                date: dateStr,
+                price: record.price
+            });
+            
+            // If price is 0, it's a blocked date
+            if (record.price === 0) {
+                if (!this.data.blockedDates[monthKey]) {
+                    this.data.blockedDates[monthKey] = [];
+                }
+                this.data.blockedDates[monthKey].push({
+                    date: dateStr,
+                    price: 0
+                });
+            }
+            
+            // Store in loadedFromDB for reference
+            if (!this.data.loadedFromDB[monthKey]) {
+                this.data.loadedFromDB[monthKey] = {};
+            }
+            this.data.loadedFromDB[monthKey][dateStr] = record.price;
+        });
+        
+        // Save loaded data to localStorage for consistency
+        Object.keys(this.data.basePrices).forEach(monthKey => {
+            this.saveMonthData(monthKey);
+        });
+    }
+
+    // Override loadMonthData to check DB data first
+    loadMonthData(monthKey) {
+        // First check if we have DB data for this month
+        if (this.data.loadedFromDB[monthKey]) {
+            // DB data takes priority
+            if (!this.data.basePrices[monthKey]) {
+                this.data.basePrices[monthKey] = {
+                    prices: [],
+                    defaultCost: this.getDefaultCost()
+                };
+            }
+            
+            // Ensure all DB data is in basePrices
+            Object.entries(this.data.loadedFromDB[monthKey]).forEach(([dateStr, price]) => {
+                const existing = this.data.basePrices[monthKey].prices.find(p => p.date === dateStr);
+                if (!existing) {
+                    this.data.basePrices[monthKey].prices.push({
+                        date: dateStr,
+                        price: price
+                    });
+                }
+            });
+        } else {
+            // Fall back to localStorage
+            const stored = localStorage.getItem(`monthData-${monthKey}`);
+            if (stored) {
+                this.data.basePrices[monthKey] = JSON.parse(stored);
+            } else {
+                this.data.basePrices[monthKey] = {prices: [], defaultCost: this.getDefaultCost()};
+            }
+        }
+        
+        const blocked = localStorage.getItem('blockedDatesMap');
+        if (blocked) {
+            const blockedData = JSON.parse(blocked);
+            // Merge with existing blocked dates
+            if (blockedData[monthKey]) {
+                if (!this.data.blockedDates[monthKey]) {
+                    this.data.blockedDates[monthKey] = [];
+                }
+                // Avoid duplicates
+                blockedData[monthKey].forEach(blockedItem => {
+                    const exists = this.data.blockedDates[monthKey].some(item => {
+                        const itemDate = typeof item === 'object' ? item.date : item;
+                        const blockedDate = typeof blockedItem === 'object' ? blockedItem.date : blockedItem;
+                        return itemDate === blockedDate;
+                    });
+                    if (!exists) {
+                        this.data.blockedDates[monthKey].push(blockedItem);
+                    }
+                });
+            }
+        }
+        
+        // First ensure base prices exist
+        this.ensureBasePrices(monthKey);
+        
+        // Then apply weekend discount if enabled
+        const weekendDiscountEnabled = localStorage.getItem('weekendDiscountEnabled') === 'true';
+        const discountPercent = parseFloat(localStorage.getItem('weekendDiscountPercent')) || 0;
+        
+        if (weekendDiscountEnabled && discountPercent > 0) {
+            // Apply discount to weekends in the loaded month data
+            const [year, month] = monthKey.split('-');
+            const basePrice = this.getDefaultCost();
+            const discountedPrice = this.applyDiscount(basePrice, discountPercent);
+            
+            this.data.basePrices[monthKey].prices = this.data.basePrices[monthKey].prices.map(item => {
+                if (this.isPastDate(item.date) || this.isDateBlocked(item.date, monthKey)) {
+                    return {...item, price: 0};
+                }
+                if (this.isWeekend(item.date)) {
+                    return {...item, price: discountedPrice};
+                }
+                return item;
+            });
+        }
+    }
+
+    // Add method to save calendar data to DB
+    async saveCalendarToDB() {
+        if (!this.serviceId || !this.supabaseClient) return;
+        
+        try {
+            // Collect all dates with prices
+            const records = [];
+            
             Object.keys(this.data.basePrices).forEach(monthKey => {
                 const [year, month] = monthKey.split('-');
                 const monthData = this.data.basePrices[monthKey];
                 
-                if (monthData && monthData.prices) {
-                    monthData.prices.forEach(priceEntry => {
-                        const [day, monthPart, yearPart] = priceEntry.date.split('.');
-                        const dbDate = `${yearPart}-${monthPart}-${day}`; // Convert to YYYY-MM-DD format
-                        
-                        calendarEntries.push({
-                            service_id: parseInt(this.serviceId),
-                            date: dbDate,
-                            price: priceEntry.price || 0
-                        });
+                monthData.prices.forEach(priceItem => {
+                    const [day, monthStr, yearStr] = priceItem.date.split('.');
+                    const dateObj = new Date(yearStr, parseInt(monthStr) - 1, parseInt(day));
+                    
+                    records.push({
+                        service_id: this.serviceId,
+                        date: dateObj.toISOString().split('T')[0], // Format as YYYY-MM-DD
+                        price: priceItem.price
                     });
-                }
+                });
             });
-
-            // Also add any DB data that might not be in basePrices
-            this.dbCalendarData.forEach((data, dbDate) => {
-                const exists = calendarEntries.some(entry => entry.date === dbDate);
-                if (!exists) {
-                    calendarEntries.push({
-                        service_id: parseInt(this.serviceId),
-                        date: dbDate,
-                        price: data.price || 0
-                    });
-                }
-            });
-
-            if (calendarEntries.length === 0) {
-                console.log('No calendar data to save');
-                return;
-            }
-
-            console.log('Saving calendar data:', calendarEntries);
-
-            // First, delete existing calendar data for this service
-            const { error: deleteError } = await this.supabaseClient
-                .from('calendar_data')
+            
+            if (records.length === 0) return;
+            
+            // Delete existing records for this service
+            await this.supabaseClient
+                .from('available_periods')
                 .delete()
                 .eq('service_id', this.serviceId);
-
-            if (deleteError) {
-                console.error('Error deleting existing calendar data:', deleteError);
-                return;
-            }
-
-            // Then insert new data
-            const { data, error } = await this.supabaseClient
-                .from('calendar_data')
-                .insert(calendarEntries);
-
+            
+            // Insert new records
+            const { error } = await this.supabaseClient
+                .from('available_periods')
+                .insert(records);
+            
             if (error) {
                 console.error('Error saving calendar data:', error);
             } else {
@@ -284,18 +324,31 @@ class CalendarManager {
         }
     }
 
+    // Override saveMonthData to also trigger DB save
+    saveMonthData(monthKey) {
+        localStorage.setItem(`monthData-${monthKey}`, JSON.stringify(this.data.basePrices[monthKey]));
+        if (Object.keys(this.data.blockedDates).length > 0) {
+            localStorage.setItem('blockedDatesMap', JSON.stringify(this.data.blockedDates));
+        }
+        
+        // Trigger DB save with debouncing
+        if (this.saveTimeout) clearTimeout(this.saveTimeout);
+        this.saveTimeout = setTimeout(() => {
+            this.saveCalendarToDB();
+        }, 1000);
+    }
+
     addStyles() {
         const style = document.createElement('style');
         style.textContent = `
             .calendar_day-wrapper.is-past {opacity:0.5;cursor:not-allowed;pointer-events:none;background-color:#f0f0f0;}
             .calendar_day-wrapper.is-past [service-price],.calendar_day-wrapper.is-past [price-currency] {color:#999;}
-            .calendar_day-wrapper.is-blocked.is-blocked-active {background-color:#ffebee;border:1px solid #f44336!important;}
+            .calendar_day-wrapper.is-blocked.is-blocked-active {background-color:#f5f5f5;}
             .calendar_day-wrapper.is-selected {background-color:#f3fcc8;color:#222A37!important;border:1px solid #7A869A!important;}
             .calendar_day-wrapper.is-wait {background-color:#F6F8FC;color:#222A37!important;border:1px solid #7A869A!important;}
             .calendar_day-wrapper.is-active {background-color:#f3fcc8;color:#222A37;}
             .calendar_day-wrapper.is-hover-range {background-color:#F6F8FC;transition:background-color 0.2s ease;}
             .calendar_day-wrapper.is-weekend-discount {background-color:#f0f9ff;border:1px solid #60a5fa!important;}
-            .calendar_day-wrapper.has-custom-price {background-color:#e8f5e8;border:1px solid #4caf50!important;}
         `;
         document.head.appendChild(style);
     }
@@ -309,12 +362,6 @@ class CalendarManager {
 
     formatDate(day, month, year) {
         return `${String(day).padStart(2,'0')}.${String(month).padStart(2,'0')}.${year}`;
-    }
-
-    // Convert DD.MM.YYYY to YYYY-MM-DD format for DB
-    formatDateForDB(dateStr) {
-        const [day, month, year] = dateStr.split('.');
-        return `${year}-${month}-${day}`;
     }
 
     createFullDate(day, monthName, year) {
@@ -341,7 +388,7 @@ class CalendarManager {
         today.setHours(0, 0, 0, 0);
         const dateToCheck = new Date(fullDate.timestamp);
         dateToCheck.setHours(0, 0, 0, 0);
-        return dateToCheck < today;
+        return dateToCheck < today;  // Changed from <= to < to exclude today
     }
 
     isDateInRanges(fullDate) {
@@ -355,7 +402,7 @@ class CalendarManager {
         const [day, month, year] = dateStr.split('.').map(Number);
         const date = new Date(year, month - 1, day);
         const dayOfWeek = date.getDay();
-        return dayOfWeek === 0 || dayOfWeek === 6;
+        return dayOfWeek === 0 || dayOfWeek === 6; // 0 = Sunday, 6 = Saturday
     }
 
     getDefaultCost() {
@@ -390,69 +437,6 @@ class CalendarManager {
         }
     }
 
-    loadMonthData(monthKey) {
-        // For backward compatibility, still load from localStorage
-        const stored = localStorage.getItem(`monthData-${monthKey}`);
-        const blocked = localStorage.getItem('blockedDatesMap');
-        
-        if (stored) {
-            const localData = JSON.parse(stored);
-            // Merge with DB data if available
-            if (!this.data.basePrices[monthKey]) {
-                this.data.basePrices[monthKey] = localData;
-            }
-        } else if (!this.data.basePrices[monthKey]) {
-            this.data.basePrices[monthKey] = {prices: [], defaultCost: this.getDefaultCost()};
-        }
-        
-        if (blocked && Object.keys(this.data.blockedDates).length === 0) {
-            this.data.blockedDates = JSON.parse(blocked);
-        }
-        
-        // Ensure base prices exist
-        this.ensureBasePrices(monthKey);
-        
-        // Apply weekend discount if enabled
-        const weekendDiscountEnabled = localStorage.getItem('weekendDiscountEnabled') === 'true';
-        const discountPercent = parseFloat(localStorage.getItem('weekendDiscountPercent')) || 0;
-        
-        if (weekendDiscountEnabled && discountPercent > 0) {
-            const [year, month] = monthKey.split('-');
-            const basePrice = this.getDefaultCost();
-            const discountedPrice = this.applyDiscount(basePrice, discountPercent);
-            
-            this.data.basePrices[monthKey].prices = this.data.basePrices[monthKey].prices.map(item => {
-                if (this.isPastDate(item.date) || this.isDateBlocked(item.date, monthKey)) {
-                    return {...item, price: 0};
-                }
-                // Don't override DB prices with weekend discount
-                const dbDate = this.formatDateForDB(item.date);
-                if (this.dbCalendarData.has(dbDate)) {
-                    return item; // Keep DB price
-                }
-                if (this.isWeekend(item.date)) {
-                    return {...item, price: discountedPrice};
-                }
-                return item;
-            });
-        }
-    }
-
-    saveMonthData(monthKey) {
-        localStorage.setItem(`monthData-${monthKey}`, JSON.stringify(this.data.basePrices[monthKey]));
-        if (Object.keys(this.data.blockedDates).length > 0) {
-            localStorage.setItem('blockedDatesMap', JSON.stringify(this.data.blockedDates));
-        }
-        
-        // Also save to database if in edit mode
-        if (this.isEditMode && this.serviceId) {
-            // Use setTimeout to avoid blocking UI
-            setTimeout(() => {
-                this.saveCalendarToDB();
-            }, 100);
-        }
-    }
-
     ensureBasePrices(monthKey) {
         const [year, month] = monthKey.split('-');
         const defaultCost = this.getDefaultCost();
@@ -478,14 +462,11 @@ class CalendarManager {
             const date = this.formatDate(day, month, year);
             
             if (!existingDates.has(date)) {
-                const dbDate = this.formatDateForDB(date);
                 const isPast = this.isPastDate(date);
                 let price = isPast ? 0 : defaultCost;
                 
-                // Check if we have data from DB for this date
-                if (this.dbCalendarData.has(dbDate)) {
-                    price = this.dbCalendarData.get(dbDate).price;
-                } else if (!isPast && weekendDiscountEnabled && discountPercent > 0 && this.isWeekend(date)) {
+                // Apply weekend discount if enabled and not past date (including today)
+                if (!isPast && weekendDiscountEnabled && discountPercent > 0 && this.isWeekend(date)) {
                     price = discountedPrice;
                 }
                 
@@ -552,11 +533,11 @@ class CalendarManager {
             this.loadMonthData(this.getCurrentMonthKey());
             this.loadMonthPrices();
             this.updatePrevMonthButtonState();
-            
             // Fix for weekend discount checkbox
             const weekendDiscountCheckbox = document.querySelector('input[name="weekend_discount"][type="checkbox"]');
             const weekendDiscountInput = document.querySelector('input[name="Weekend-Discount"][type="text"]');
             if (weekendDiscountCheckbox && weekendDiscountCheckbox.checked) {
+                // Ensure input stays visible
                 if (weekendDiscountInput) weekendDiscountInput.style.display = 'block';
                 const discountPercent = parseFloat(localStorage.getItem('weekendDiscountPercent')) || 0;
                 if (discountPercent > 0) this.applyWeekendDiscount(discountPercent);
@@ -587,19 +568,16 @@ class CalendarManager {
             const day = parseInt(dayText);
             const fullDate = this.createFullDate(day, monthName, parseInt(year));
             const dateStr = this.formatDate(day, this.monthMap[monthName], year);
-            const dbDate = this.formatDateForDB(dateStr);
             const timestamp = fullDate.timestamp;
 
             const isInRange = this.isDateInRanges(fullDate);
             const isExcluded = this.data.excludedDays.has(timestamp);
             const isPast = this.isPastOrCurrentDate(fullDate);
             const isBlocked = this.isDateBlocked(dateStr, monthKey);
-            const hasDBData = this.dbCalendarData.has(dbDate);
 
             dayWrapper.classList.toggle('is-past', isPast);
             dayWrapper.classList.toggle('is-blocked', isBlocked);
             dayWrapper.classList.toggle('is-blocked-active', isBlocked);
-            dayWrapper.classList.toggle('has-custom-price', hasDBData && !isBlocked && !isPast);
             
             if (isPast || isBlocked) {
                 dayWrapper.classList.remove('is-selected', 'is-wait', 'is-active');
@@ -612,9 +590,6 @@ class CalendarManager {
             if (servicePriceElement) {
                 if (isPast || isBlocked) {
                     servicePriceElement.textContent = 0;
-                } else if (hasDBData) {
-                    // Use price from database
-                    servicePriceElement.textContent = this.dbCalendarData.get(dbDate).price;
                 } else if (isExcluded) {
                     servicePriceElement.textContent = basePrice;
                     dayWrapper.classList.remove('is-weekend-discount');
@@ -659,22 +634,17 @@ class CalendarManager {
 
             const day = parseInt(dayElement.textContent.trim());
             const date = this.formatDate(day, month, year);
-            const dbDate = this.formatDateForDB(date);
             const priceObj = monthPrices.find(item => item.date === date);
             const isPast = this.isPastDate(date);
             const isBlocked = this.isDateBlocked(date, monthKey);
-            const hasDBData = this.dbCalendarData.has(dbDate);
             
             dayWrapper.classList.toggle('is-past', isPast);
             dayWrapper.classList.toggle('is-blocked', isBlocked);
             dayWrapper.classList.toggle('is-blocked-active', isBlocked);
-            dayWrapper.classList.toggle('has-custom-price', hasDBData && !isBlocked && !isPast);
 
             let finalPrice;
             if (isPast || isBlocked) {
                 finalPrice = 0;
-            } else if (hasDBData) {
-                finalPrice = this.dbCalendarData.get(dbDate).price;
             } else if (weekendDiscountEnabled && discountPercent > 0 && this.isWeekend(date)) {
                 finalPrice = discountedPrice;
                 dayWrapper.classList.add('is-weekend-discount');
@@ -688,13 +658,6 @@ class CalendarManager {
     }
 
     isDateBlocked(dateStr, monthKey) {
-        // Check DB data first
-        const dbDate = this.formatDateForDB(dateStr);
-        if (this.dbCalendarData.has(dbDate)) {
-            return this.dbCalendarData.get(dbDate).isBlocked;
-        }
-        
-        // Fallback to local data
         if (!this.data.blockedDates[monthKey]) return false;
         return this.data.blockedDates[monthKey].some(item => {
             return (typeof item === 'object' && item.date) ? item.date === dateStr : item === dateStr;
@@ -709,15 +672,6 @@ class CalendarManager {
 
         for (let day = startDay; day <= endDay; day++) {
             const dateStr = this.formatDate(day, month, year);
-            const dbDate = this.formatDateForDB(dateStr);
-            
-            // Update DB data
-            this.dbCalendarData.set(dbDate, {
-                price: 0,
-                isBlocked: true,
-                originalEntry: null
-            });
-            
             const existingIndex = this.data.blockedDates[monthKey].findIndex(item => {
                 return (typeof item === 'object' && item.date) ? item.date === dateStr : item === dateStr;
             });
@@ -734,10 +688,6 @@ class CalendarManager {
         if (!monthKey || !this.data.blockedDates[monthKey]) return;
         const [year, month] = monthKey.split('-');
         const dateStr = this.formatDate(day, month, year);
-        const dbDate = this.formatDateForDB(dateStr);
-
-        // Remove from DB data
-        this.dbCalendarData.delete(dbDate);
 
         this.data.blockedDates[monthKey] = this.data.blockedDates[monthKey].filter(item => {
             return (typeof item === 'object' && item.date) ? item.date !== dateStr : item !== dateStr;
@@ -772,19 +722,6 @@ class CalendarManager {
             const date = new Date(currentDate);
             const timestamp = date.getTime();
             if (this.isPastOrCurrentDate({timestamp}) || this.data.excludedDays.has(timestamp)) continue;
-            
-            // Update DB data for this date
-            const day = date.getDate();
-            const month = (date.getMonth() + 1).toString().padStart(2, '0');
-            const year = date.getFullYear();
-            const dbDate = `${year}-${month}-${day.toString().padStart(2, '0')}`;
-            
-            this.dbCalendarData.set(dbDate, {
-                price: discountedPrice,
-                isBlocked: false,
-                originalEntry: null
-            });
-            
             this.data.dateDiscounts[timestamp] = discountedPrice;
         }
 
@@ -805,13 +742,6 @@ class CalendarManager {
 
         this.data.basePrices[monthKey].prices = this.data.basePrices[monthKey].prices.map(item => {
             if (this.isPastDate(item.date) || this.isDateBlocked(item.date, monthKey)) return {...item, price: 0};
-            
-            // Don't override DB prices with weekend discount
-            const dbDate = this.formatDateForDB(item.date);
-            if (this.dbCalendarData.has(dbDate)) {
-                return item; // Keep DB price
-            }
-            
             if (this.isWeekend(item.date)) return {...item, price: discountedPrice};
             return item;
         });
@@ -825,12 +755,7 @@ class CalendarManager {
             const day = parseInt(dayElement.textContent.trim());
             if (isNaN(day)) return;
             const date = this.formatDate(day, month, year);
-            const dbDate = this.formatDateForDB(date);
-            
             if (this.isPastDate(date) || this.isDateBlocked(date, monthKey)) return;
-
-            // Don't override DB prices
-            if (this.dbCalendarData.has(dbDate)) return;
 
             if (this.isWeekend(date)) {
                 servicePriceElement.textContent = discountedPrice;
@@ -851,13 +776,6 @@ class CalendarManager {
 
         this.data.basePrices[monthKey].prices = this.data.basePrices[monthKey].prices.map(item => {
             if (this.isPastDate(item.date) || this.isDateBlocked(item.date, monthKey)) return {...item, price: 0};
-            
-            // Don't override DB prices with weekend discount removal
-            const dbDate = this.formatDateForDB(item.date);
-            if (this.dbCalendarData.has(dbDate)) {
-                return item; // Keep DB price
-            }
-            
             if (this.isWeekend(item.date)) return {...item, price: basePrice};
             return item;
         });
@@ -871,12 +789,7 @@ class CalendarManager {
             const day = parseInt(dayElement.textContent.trim());
             if (isNaN(day)) return;
             const date = this.formatDate(day, month, year);
-            const dbDate = this.formatDateForDB(date);
-            
             if (this.isPastDate(date) || this.isDateBlocked(date, monthKey)) return;
-
-            // Don't override DB prices
-            if (this.dbCalendarData.has(dbDate)) return;
 
             if (this.isWeekend(date)) {
                 servicePriceElement.textContent = basePrice;
@@ -891,7 +804,6 @@ class CalendarManager {
         this.data.excludedDays.clear();
         this.data.dateDiscounts = {};
         this.data.blockedDates = {};
-        this.dbCalendarData.clear(); // Clear DB data
         this.selection.tempStart = null;
         this.selection.tempStartMonth = null;
         this.selection.tempStartYear = null;
@@ -910,7 +822,9 @@ class CalendarManager {
         const weekendDiscountCheckbox = document.querySelector('input[name="weekend_discount"][type="checkbox"]');
         const weekendDiscountInput = document.querySelector('input[name="Weekend-Discount"][type="text"]');
         if (weekendDiscountCheckbox && weekendDiscountCheckbox.checked) {
+            // First remove the discount from all weekends
             this.removeWeekendDiscount();
+            // Then uncheck the checkbox
             weekendDiscountCheckbox.checked = false;
             weekendDiscountCheckbox.dispatchEvent(new Event('change'));
         }
@@ -919,15 +833,9 @@ class CalendarManager {
             weekendDiscountInput.style.display = 'none';
         }
         
+        // Remove weekend discount settings from localStorage
         localStorage.removeItem('weekendDiscountEnabled');
         localStorage.removeItem('weekendDiscountPercent');
-
-        // Clear from database if in edit mode
-        if (this.isEditMode && this.serviceId) {
-            setTimeout(() => {
-                this.saveCalendarToDB();
-            }, 100);
-        }
 
         this.updateCalendar();
         this.toggleSettingsVisibility(false);
@@ -1222,6 +1130,7 @@ class CalendarManager {
                     
                     this.blockingMode = false;
                     
+                    // Switch button states
                     const button_open = document.querySelector('[button_open]');
                     const blockButton = document.querySelector('[button_block]');
                     if (button_open) button_open.classList.add('is--add-service');
@@ -1267,7 +1176,7 @@ class CalendarManager {
             });
         }
 
-        // Weekend discount handling - keeping original logic
+        // Fix weekend discount checkbox handling
         const weekendDiscountCheckbox = document.querySelector('input[name="weekend_discount"][type="checkbox"]');
         const weekendDiscountInput = document.querySelector('input[name="Weekend-Discount"][type="text"]');
         
@@ -1295,9 +1204,11 @@ class CalendarManager {
 
             weekendDiscountInput.addEventListener('input', (event) => {
                 let value = event.target.value;
+                // Remove any non-numeric characters except decimal point
                 let numericValue = value.replace(/[^\d.]/g, '');
                 let discountPercent = parseFloat(numericValue) || 0;
                 
+                // Only update value if it changed (to avoid cursor jump)
                 if (value !== numericValue) {
                     event.target.value = numericValue;
                 }
@@ -1329,6 +1240,10 @@ class CalendarManager {
                 if (value.includes('%')) {
                     event.target.value = value.replace('%', '');
                 }
+                event.stopPropagation();
+            });
+
+            weekendDiscountInput.addEventListener('focus', (event) => {
                 event.stopPropagation();
             });
 
@@ -1484,213 +1399,15 @@ class CalendarManager {
                 if (this.isPastDate(priceItem.date) || this.isDateBlocked(priceItem.date, monthKey)) {
                     return {...priceItem, price: 0};
                 }
-                
-                // Don't override DB prices with new default price
-                const dbDate = this.formatDateForDB(priceItem.date);
-                if (this.dbCalendarData.has(dbDate)) {
-                    return priceItem; // Keep DB price
-                }
-                
                 return {...priceItem, price: newPrice};
             });
             this.saveMonthData(monthKey);
         });
         this.loadMonthPrices();
     }
-
-    // Method to manually update a specific date's price
-    updateDatePrice(day, monthKey, newPrice) {
-        const [year, month] = monthKey.split('-');
-        const dateStr = this.formatDate(day, month, year);
-        const dbDate = this.formatDateForDB(dateStr);
-        
-        // Update DB data
-        this.dbCalendarData.set(dbDate, {
-            price: newPrice,
-            isBlocked: newPrice === 0,
-            originalEntry: null
-        });
-        
-        // Update local data
-        if (!this.data.basePrices[monthKey]) {
-            this.data.basePrices[monthKey] = {prices: [], defaultCost: this.getDefaultCost()};
-        }
-        
-        const existingIndex = this.data.basePrices[monthKey].prices.findIndex(item => item.date === dateStr);
-        if (existingIndex !== -1) {
-            this.data.basePrices[monthKey].prices[existingIndex].price = newPrice;
-        } else {
-            this.data.basePrices[monthKey].prices.push({date: dateStr, price: newPrice});
-        }
-        
-        // Update blocked dates if price is 0
-        if (newPrice === 0) {
-            if (!this.data.blockedDates[monthKey]) {
-                this.data.blockedDates[monthKey] = [];
-            }
-            const existingBlockIndex = this.data.blockedDates[monthKey].findIndex(item => {
-                return (typeof item === 'object' && item.date) ? item.date === dateStr : item === dateStr;
-            });
-            if (existingBlockIndex === -1) {
-                this.data.blockedDates[monthKey].push({date: dateStr, price: 0});
-            }
-        } else {
-            // Remove from blocked dates if price > 0
-            if (this.data.blockedDates[monthKey]) {
-                this.data.blockedDates[monthKey] = this.data.blockedDates[monthKey].filter(item => {
-                    return (typeof item === 'object' && item.date) ? item.date !== dateStr : item !== dateStr;
-                });
-                if (this.data.blockedDates[monthKey].length === 0) {
-                    delete this.data.blockedDates[monthKey];
-                }
-            }
-        }
-        
-        this.updateAllDaysDisplay();
-        this.saveMonthData(monthKey);
-    }
-
-    // Method to get current month's pricing data for external use
-    getCurrentMonthData() {
-        const monthKey = this.getCurrentMonthKey();
-        if (!monthKey) return null;
-        
-        const monthData = this.data.basePrices[monthKey];
-        const result = {
-            monthKey: monthKey,
-            defaultCost: monthData?.defaultCost || this.getDefaultCost(),
-            dates: []
-        };
-        
-        if (monthData && monthData.prices) {
-            monthData.prices.forEach(priceItem => {
-                const dbDate = this.formatDateForDB(priceItem.date);
-                result.dates.push({
-                    date: priceItem.date,
-                    dbDate: dbDate,
-                    price: priceItem.price,
-                    isBlocked: priceItem.price === 0,
-                    hasDBData: this.dbCalendarData.has(dbDate)
-                });
-            });
-        }
-        
-        return result;
-    }
-
-    // Method to export all calendar data for saving to form
-    exportCalendarData() {
-        const allData = [];
-        
-        Object.keys(this.data.basePrices).forEach(monthKey => {
-            const monthData = this.data.basePrices[monthKey];
-            if (monthData && monthData.prices) {
-                monthData.prices.forEach(priceItem => {
-                    const dbDate = this.formatDateForDB(priceItem.date);
-                    allData.push({
-                        date: dbDate,
-                        price: priceItem.price
-                    });
-                });
-            }
-        });
-        
-        // Also include any DB data that might not be in current month view
-        this.dbCalendarData.forEach((data, dbDate) => {
-            const existingIndex = allData.findIndex(item => item.date === dbDate);
-            if (existingIndex === -1) {
-                allData.push({
-                    date: dbDate,
-                    price: data.price
-                });
-            }
-        });
-        
-        return allData.sort((a, b) => a.date.localeCompare(b.date));
-    }
-
-    // Method to manually add price editing capability to calendar days
-    enablePriceEditing() {
-        document.querySelectorAll('.calendar_day-wrapper:not(.not_exist)').forEach(dayWrapper => {
-            const servicePriceElement = dayWrapper.querySelector('[service-price]');
-            if (!servicePriceElement) return;
-            
-            // Make price editable on double-click
-            servicePriceElement.addEventListener('dblclick', (event) => {
-                event.stopPropagation();
-                
-                if (dayWrapper.classList.contains('is-past') || dayWrapper.classList.contains('is-blocked')) {
-                    return;
-                }
-                
-                const currentPrice = parseInt(servicePriceElement.textContent) || 0;
-                const input = document.createElement('input');
-                input.type = 'number';
-                input.value = currentPrice;
-                input.min = '0';
-                input.style.width = '60px';
-                input.style.textAlign = 'center';
-                input.style.border = '1px solid #ccc';
-                input.style.borderRadius = '3px';
-                
-                servicePriceElement.style.display = 'none';
-                servicePriceElement.parentNode.appendChild(input);
-                input.focus();
-                input.select();
-                
-                const savePrice = () => {
-                    const newPrice = parseInt(input.value) || 0;
-                    const dayElement = dayWrapper.querySelector('[day]');
-                    const day = parseInt(dayElement.textContent.trim());
-                    const monthKey = this.getCurrentMonthKey();
-                    
-                    if (monthKey) {
-                        this.updateDatePrice(day, monthKey, newPrice);
-                    }
-                    
-                    servicePriceElement.textContent = newPrice;
-                    servicePriceElement.style.display = '';
-                    input.remove();
-                };
-                
-                input.addEventListener('blur', savePrice);
-                input.addEventListener('keydown', (e) => {
-                    if (e.key === 'Enter') {
-                        savePrice();
-                    } else if (e.key === 'Escape') {
-                        servicePriceElement.style.display = '';
-                        input.remove();
-                    }
-                });
-            });
-        });
-    }
 }
 
-// Auto-initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
     window.calendarManager = new CalendarManager();
 });
-
-// Export function for form integration
-window.getCalendarData = function() {
-    if (window.calendarManager) {
-        return window.calendarManager.exportCalendarData();
-    }
-    return [];
-};
-
-// Function to manually set service ID if needed
-window.setServiceId = function(serviceId) {
-    if (window.calendarManager) {
-        window.calendarManager.serviceId = serviceId;
-        window.calendarManager.isEditMode = !!serviceId;
-        if (serviceId) {
-            window.calendarManager.loadCalendarFromDB().then(() => {
-                window.calendarManager.updateCalendar();
-                window.calendarManager.enablePriceEditing();
-            });
-        }
-    }
-};
 </script>
