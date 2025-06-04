@@ -7,7 +7,7 @@ class FixedCalendarManager {
             dateRanges: [],
             excludedDays: new Set(),
             dateDiscounts: {},
-            globalSettings: { defaultCost: 8000 }
+            globalSettings: { defaultCost: null }
         };
         this.selection = {
             tempStart: null,
@@ -19,6 +19,7 @@ class FixedCalendarManager {
         this.supabaseClient = null;
         this.isEditMode = false;
         this.blockingMode = false;
+        this.unblockingMode = false; // Новый режим для разблокировки
         this.monthMap = {
             'January':'01','February':'02','March':'03','April':'04',
             'May':'05','June':'06','July':'07','August':'08',
@@ -217,7 +218,10 @@ class FixedCalendarManager {
         try {
             const stored = localStorage.getItem('calendarGlobalSettings');
             if (stored) {
-                this.data.globalSettings = JSON.parse(stored);
+                const settings = JSON.parse(stored);
+                if (settings.defaultCost) {
+                    this.data.globalSettings = settings;
+                }
             }
         } catch (error) {
             console.error('❌ Ошибка загрузки из localStorage:', error);
@@ -228,7 +232,7 @@ class FixedCalendarManager {
         try {
             const defaultCost = this.getDefaultCost();
             const monthKey = this.getCurrentMonthKey();
-            if (monthKey) {
+            if (monthKey && defaultCost) {
                 this.ensureBasePrices(monthKey);
             }
         } catch (error) {
@@ -254,10 +258,11 @@ class FixedCalendarManager {
                 }
             }
             
-            return this.data.globalSettings.defaultCost || 8000;
+            // Возвращаем сохраненное значение или null
+            return this.data.globalSettings.defaultCost || null;
         } catch (error) {
             console.error('❌ Ошибка получения цены по умолчанию:', error);
-            return 8000;
+            return null;
         }
     }
 
@@ -265,6 +270,7 @@ class FixedCalendarManager {
         try {
             const costInput = this.getCostInput();
             
+            // НЕ устанавливаем значение по умолчанию
             if (costInput && costInput.value) {
                 const inputValue = parseInt(costInput.value);
                 if (!isNaN(inputValue) && inputValue > 0) {
@@ -278,27 +284,16 @@ class FixedCalendarManager {
                 const stored = localStorage.getItem('calendarGlobalSettings');
                 if (stored) {
                     const settings = JSON.parse(stored);
-                    this.data.globalSettings = settings;
-                    console.log(`📦 Настройки загружены из localStorage: ${settings.defaultCost}`);
-                    
-                    if (costInput && !costInput.value && settings.defaultCost) {
-                        costInput.value = settings.defaultCost;
+                    if (settings.defaultCost) {
+                        this.data.globalSettings = settings;
+                        console.log(`📦 Настройки загружены из localStorage: ${settings.defaultCost}`);
+                        
+                        // НЕ устанавливаем значение в input поле автоматически
                     }
-                    return;
                 }
-            }
-            
-            if (!this.data.globalSettings.defaultCost) {
-                this.data.globalSettings.defaultCost = 8000;
-                console.log(`🔧 Использована цена по умолчанию: 8000`);
-            }
-            
-            if (costInput && !costInput.value) {
-                costInput.value = this.data.globalSettings.defaultCost;
             }
         } catch (error) {
             console.error('❌ Ошибка загрузки глобальных настроек:', error);
-            this.data.globalSettings.defaultCost = 8000;
         }
     }
 
@@ -318,7 +313,11 @@ class FixedCalendarManager {
                 .calendar_day-wrapper.is-blocked {
                     background-color: #ffebee !important;
                     border: 2px solid #f44336 !important;
-                    cursor: not-allowed;
+                    cursor: pointer;
+                }
+                .calendar_day-wrapper.is-blocked.is-hover-unblock {
+                    background-color: #c8e6c9 !important;
+                    border: 2px solid #4caf50 !important;
                 }
                 .calendar_day-wrapper.is-database-loaded {
                     border: 2px solid #4caf50 !important;
@@ -457,6 +456,13 @@ class FixedCalendarManager {
                 this.loadMonthData(this.getCurrentMonthKey());
                 this.updateAllDaysDisplay();
                 this.updatePrevMonthButtonState();
+                
+                // Применяем скидку выходного дня после обновления календаря
+                const weekendDiscountEnabled = localStorage.getItem('weekendDiscountEnabled') === 'true';
+                const discountPercent = parseFloat(localStorage.getItem('weekendDiscountPercent')) || 0;
+                if (weekendDiscountEnabled && discountPercent > 0) {
+                    this.applyWeekendDiscount(discountPercent);
+                }
             }, 50);
         } catch (error) {
             console.error('❌ Ошибка обновления календаря:', error);
@@ -529,7 +535,8 @@ class FixedCalendarManager {
             if (stored) {
                 this.data.basePrices[monthKey] = JSON.parse(stored);
             } else {
-                this.data.basePrices[monthKey] = {prices: [], defaultCost: this.getDefaultCost()};
+                const defaultCost = this.getDefaultCost();
+                this.data.basePrices[monthKey] = {prices: [], defaultCost: defaultCost};
             }
             
             if (blocked) this.data.blockedDates = JSON.parse(blocked);
@@ -543,17 +550,19 @@ class FixedCalendarManager {
             if (weekendDiscountEnabled && discountPercent > 0) {
                 const [year, month] = monthKey.split('-');
                 const basePrice = this.getDefaultCost();
-                const discountedPrice = this.applyDiscount(basePrice, discountPercent);
-                
-                this.data.basePrices[monthKey].prices = this.data.basePrices[monthKey].prices.map(item => {
-                    if (this.isPastDate(item.date) || this.isDateBlocked(item.date, monthKey)) {
-                        return {...item, price: 0};
-                    }
-                    if (this.isWeekend(item.date)) {
-                        return {...item, price: discountedPrice};
-                    }
-                    return item;
-                });
+                if (basePrice) {
+                    const discountedPrice = this.applyDiscount(basePrice, discountPercent);
+                    
+                    this.data.basePrices[monthKey].prices = this.data.basePrices[monthKey].prices.map(item => {
+                        if (this.isPastDate(item.date) || this.isDateBlocked(item.date, monthKey)) {
+                            return {...item, price: 0};
+                        }
+                        if (this.isWeekend(item.date)) {
+                            return {...item, price: discountedPrice};
+                        }
+                        return item;
+                    });
+                }
             }
         } catch (error) {
             console.error('❌ Ошибка загрузки данных месяца:', error);
@@ -566,6 +575,11 @@ class FixedCalendarManager {
             
             const [year, month] = monthKey.split('-');
             const defaultCost = this.getDefaultCost();
+            
+            if (!defaultCost) {
+                console.log('⚠️ Цена по умолчанию не установлена');
+                return;
+            }
             
             console.log(`📅 Обработка месяца ${monthKey}, базовая цена: ${defaultCost}`);
             
@@ -626,7 +640,7 @@ class FixedCalendarManager {
             // Check if weekend discount is enabled
             const weekendDiscountEnabled = localStorage.getItem('weekendDiscountEnabled') === 'true';
             const discountPercent = parseFloat(localStorage.getItem('weekendDiscountPercent')) || 0;
-            const discountedPrice = weekendDiscountEnabled && discountPercent > 0 
+            const discountedPrice = weekendDiscountEnabled && discountPercent > 0 && defaultCost
                 ? this.applyDiscount(defaultCost, discountPercent) 
                 : defaultCost;
 
@@ -668,24 +682,28 @@ class FixedCalendarManager {
                 // Update price
                 const servicePriceElement = dayWrapper.querySelector('[service-price]');
                 if (servicePriceElement) {
-                    let price = defaultCost;
+                    let price = defaultCost || 0;
                     
                     if (isPast || isBlocked) {
                         price = 0;
                     } else if (isExcluded) {
-                        price = defaultCost;
+                        price = defaultCost || 0;
                         dayWrapper.classList.remove('is-weekend-discount');
                     } else if (this.data.dateDiscounts[timestamp] !== undefined) {
                         price = this.data.dateDiscounts[timestamp];
-                    } else if (weekendDiscountEnabled && discountPercent > 0 && this.isWeekend(dateStr)) {
+                    } else if (weekendDiscountEnabled && discountPercent > 0 && this.isWeekend(dateStr) && defaultCost) {
                         price = discountedPrice;
                         dayWrapper.classList.add('is-weekend-discount');
                     } else {
                         const priceData = this.getPriceForDate(dateStr, monthKey);
                         if (priceData !== null) {
                             price = priceData;
+                            // Проверяем, применена ли скидка выходного дня к этой цене
+                            if (weekendDiscountEnabled && this.isWeekend(dateStr) && price === discountedPrice) {
+                                dayWrapper.classList.add('is-weekend-discount');
+                            }
                         } else {
-                            price = defaultCost;
+                            price = defaultCost || 0;
                         }
                         if (!this.isWeekend(dateStr)) {
                             dayWrapper.classList.remove('is-weekend-discount');
@@ -802,6 +820,8 @@ class FixedCalendarManager {
 
         const discountPercent = parseFloat(selectedDiscountInput.value.replace(/[^\d.]/g, '')) || 0;
         const basePrice = this.getDefaultCost();
+        if (!basePrice) return;
+        
         const discountedPrice = this.applyDiscount(basePrice, discountPercent);
         const lastRange = this.data.dateRanges[this.data.dateRanges.length - 1];
 
@@ -823,6 +843,11 @@ class FixedCalendarManager {
         const monthKey = this.getCurrentMonthKey();
         if (!monthKey) return;
         const basePrice = this.getDefaultCost();
+        if (!basePrice) {
+            console.warn('⚠️ Не могу применить скидку выходного дня: базовая цена не установлена');
+            return;
+        }
+        
         const discountedPrice = this.applyDiscount(basePrice, discountPercent);
         
         if (!this.data.basePrices[monthKey]) {
@@ -851,6 +876,8 @@ class FixedCalendarManager {
                 dayWrapper.classList.add('is-weekend-discount');
             }
         });
+        
+        console.log(`✅ Скидка выходного дня ${discountPercent}% применена`);
         this.saveMonthData(monthKey);
     }
 
@@ -858,6 +885,7 @@ class FixedCalendarManager {
         const monthKey = this.getCurrentMonthKey();
         if (!monthKey) return;
         const basePrice = this.getDefaultCost();
+        if (!basePrice) return;
 
         if (!this.data.basePrices[monthKey]) {
             this.data.basePrices[monthKey] = {prices: [], defaultCost: basePrice};
@@ -900,7 +928,7 @@ class FixedCalendarManager {
                 weekendDiscountInput.style.display = 'block';
                 if (savedDiscountPercent > 0) {
                     weekendDiscountInput.value = savedDiscountPercent + '%';
-                    this.applyWeekendDiscount(savedDiscountPercent);
+                    // Не применяем скидку сразу, дождемся загрузки календаря
                 }
             }
         }
@@ -916,6 +944,9 @@ class FixedCalendarManager {
     clearHoverState() {
         document.querySelectorAll('.calendar_day-wrapper.is-hover-range').forEach(day => {
             day.classList.remove('is-hover-range');
+        });
+        document.querySelectorAll('.calendar_day-wrapper.is-hover-unblock').forEach(day => {
+            day.classList.remove('is-hover-unblock');
         });
     }
 
@@ -1029,6 +1060,26 @@ class FixedCalendarManager {
         this.saveMonthData(monthKey);
     }
 
+    unblockDateRange(startDay, endDay) {
+        const monthKey = this.getCurrentMonthKey();
+        if (!monthKey || !this.data.blockedDates[monthKey]) return;
+        const [year, month] = monthKey.split('-');
+
+        for (let day = startDay; day <= endDay; day++) {
+            const dateStr = this.formatDate(day, month, year);
+            this.data.blockedDates[monthKey] = this.data.blockedDates[monthKey].filter(item => {
+                return (typeof item === 'object' && item.date) ? item.date !== dateStr : item !== dateStr;
+            });
+        }
+
+        if (this.data.blockedDates[monthKey].length === 0) {
+            delete this.data.blockedDates[monthKey];
+        }
+        
+        this.updateAllDaysDisplay();
+        this.saveMonthData(monthKey);
+    }
+
     clearBlockedDate(day) {
         const monthKey = this.getCurrentMonthKey();
         if (!monthKey || !this.data.blockedDates[monthKey]) return;
@@ -1036,7 +1087,7 @@ class FixedCalendarManager {
         const dateStr = this.formatDate(day, month, year);
 
         this.data.blockedDates[monthKey] = this.data.blockedDates[monthKey].filter(item => {
-            return (typeof item === 'object' && item.date) ? item.date !== dateStr : item !== dateStr;
+            return (typeof item === 'object' && item.date) ? item.date !== dateStr : item === dateStr;
         });
 
         if (this.data.blockedDates[monthKey].length === 0) {
@@ -1210,18 +1261,27 @@ class FixedCalendarManager {
             
             if (costInput) {
                 costInput.addEventListener('input', () => {
-                    const newCost = parseInt(costInput.value) || 8000;
-                    console.log(`💰 Цена изменена в input поле: ${newCost}`);
-                    
-                    this.data.globalSettings.defaultCost = newCost;
-                    
-                    if (!this.isEditMode) {
-                        localStorage.setItem('calendarGlobalSettings', JSON.stringify(this.data.globalSettings));
+                    const newCost = parseInt(costInput.value);
+                    if (!isNaN(newCost) && newCost > 0) {
+                        console.log(`💰 Цена изменена в input поле: ${newCost}`);
+                        
+                        this.data.globalSettings.defaultCost = newCost;
+                        
+                        if (!this.isEditMode) {
+                            localStorage.setItem('calendarGlobalSettings', JSON.stringify(this.data.globalSettings));
+                        }
+                        
+                        // Применяем скидку выходного дня если включена
+                        const weekendDiscountEnabled = localStorage.getItem('weekendDiscountEnabled') === 'true';
+                        const discountPercent = parseFloat(localStorage.getItem('weekendDiscountPercent')) || 0;
+                        if (weekendDiscountEnabled && discountPercent > 0) {
+                            this.applyWeekendDiscount(discountPercent);
+                        }
+                        
+                        this.updateAllDaysDisplay();
+                        
+                        console.log(`✅ Календарь обновлен с новой ценой: ${newCost}`);
                     }
-                    
-                    this.updateAllDaysDisplay();
-                    
-                    console.log(`✅ Календарь обновлен с новой ценой: ${newCost}`);
                 });
                 
                 costInput.addEventListener('change', () => {
@@ -1251,7 +1311,40 @@ class FixedCalendarManager {
             const [currentMonthName, currentYear] = monthYearElement.textContent.trim().split(' ');
             const fullDate = this.createFullDate(currentDate, currentMonthName, parseInt(currentYear));
             
-            if (this.isPastOrCurrentDate(fullDate) || !this.selection.isConfirmed || dayWrapper.classList.contains('is-blocked')) return;
+            // Специальная обработка для режима разблокировки
+            if (this.unblockingMode && dayWrapper.classList.contains('is-blocked')) {
+                if (!this.selection.tempStart) {
+                    this.clearWaitState();
+                    this.selection.tempStart = currentDate;
+                    this.selection.tempStartMonth = currentMonthName;
+                    this.selection.tempStartYear = parseInt(currentYear);
+                    dayWrapper.classList.add('is-wait');
+                } else {
+                    let startDate = this.selection.tempStart;
+                    let endDate = currentDate;
+                    
+                    if (startDate > endDate) {
+                        [startDate, endDate] = [endDate, startDate];
+                    }
+                    
+                    this.unblockDateRange(startDate, endDate);
+                    
+                    this.clearWaitState();
+                    this.selection.tempStart = null;
+                    this.selection.tempStartMonth = null;
+                    this.selection.tempStartYear = null;
+                    
+                    // Выходим из режима разблокировки
+                    this.unblockingMode = false;
+                    this.toggleSettingsVisibility(false);
+                    this.selection.isConfirmed = true;
+                }
+                return;
+            }
+            
+            // Обычная обработка для незаблокированных дат
+            if (this.isPastOrCurrentDate(fullDate) || !this.selection.isConfirmed || 
+                (dayWrapper.classList.contains('is-blocked') && !this.unblockingMode)) return;
 
             const isInRange = this.isDateInRanges(fullDate);
 
@@ -1260,7 +1353,7 @@ class FixedCalendarManager {
                 delete this.data.dateDiscounts[fullDate.timestamp];
                 
                 const servicePriceElement = dayWrapper.querySelector('[service-price]');
-                if (servicePriceElement) servicePriceElement.textContent = this.getDefaultCost();
+                if (servicePriceElement) servicePriceElement.textContent = this.getDefaultCost() || 0;
 
                 this.clearWaitState();
                 this.selection.tempStart = null;
@@ -1316,7 +1409,7 @@ class FixedCalendarManager {
         document.addEventListener('mouseover', (event) => {
             const dayWrapper = event.target.closest('.calendar_day-wrapper');
             if (!dayWrapper || !this.selection.tempStart || dayWrapper.classList.contains('not_exist') || 
-                dayWrapper.classList.contains('is-past') || dayWrapper.classList.contains('is-blocked')) return;
+                dayWrapper.classList.contains('is-past')) return;
 
             const cell = dayWrapper.querySelector('[day]');
             if (!cell) return;
@@ -1350,9 +1443,13 @@ class FixedCalendarManager {
 
                 if (currentFullDate.timestamp >= rangeStart.timestamp && 
                     currentFullDate.timestamp <= rangeEnd.timestamp &&
-                    !wrapper.classList.contains('is-past') &&
-                    !wrapper.classList.contains('is-blocked')) {
-                    wrapper.classList.add('is-hover-range');
+                    !wrapper.classList.contains('is-past')) {
+                    
+                    if (this.unblockingMode && wrapper.classList.contains('is-blocked')) {
+                        wrapper.classList.add('is-hover-unblock');
+                    } else if (!wrapper.classList.contains('is-blocked')) {
+                        wrapper.classList.add('is-hover-range');
+                    }
                 }
             });
         });
@@ -1376,358 +1473,406 @@ class FixedCalendarManager {
                         const dateMatch = dateRangeText.match(/(\d+)\s*-\s*(\d+)\s*(\w+)/);
 
                         if (dateMatch) {
-                            const startDay = parseInt(dateMatch[1]);
-                            const endDay = parseInt(dateMatch[2]);
-                            this.blockDateRange(startDay, endDay);
-                        }
-                    }
-                    
-                    this.blockingMode = false;
-                    
-                    const button_open = document.querySelector('[button_open]');
-                    const blockButton = document.querySelector('[button_block]');
-                    if (button_open) button_open.classList.add('is--add-service');
-                    if (blockButton) blockButton.classList.remove('is--add-service');
-                    
-                    const discountWrapper = document.querySelector('.input-wrap:has(#selected_discount)');
-                    if (discountWrapper) discountWrapper.style.display = '';
-                    
-                    const selectedDiscountInput = document.querySelector('#selected_discount');
-                    if (selectedDiscountInput) {
-                        selectedDiscountInput.placeholder = '';
-                        selectedDiscountInput.disabled = false;
-                    }
-                    
-                    this.cancelLastRange();
-                } else {
-                    this.applyDiscountToRange();
-                }
-            });
-        }
+                          const startDay = parseInt(dateMatch[1]);
+                         const endDay = parseInt(dateMatch[2]);
+                         this.blockDateRange(startDay, endDay);
+                     }
+                 }
+                 
+                 this.blockingMode = false;
+                 
+                 const button_open = document.querySelector('[button_open]');
+                 const blockButton = document.querySelector('[button_block]');
+                 if (button_open) button_open.classList.add('is--add-service');
+                 if (blockButton) blockButton.classList.remove('is--add-service');
+                 
+                 const discountWrapper = document.querySelector('.input-wrap:has(#selected_discount)');
+                 if (discountWrapper) discountWrapper.style.display = '';
+                 
+                 const selectedDiscountInput = document.querySelector('#selected_discount');
+                 if (selectedDiscountInput) {
+                     selectedDiscountInput.placeholder = '';
+                     selectedDiscountInput.disabled = false;
+                 }
+                 
+                 this.cancelLastRange();
+             } else {
+                 this.applyDiscountToRange();
+             }
+         });
+     }
 
-        const cancelButton = document.querySelector('[calendar-choosen-cancel]');
-        if (cancelButton) {
-            cancelButton.addEventListener('click', (event) => {
-                event.preventDefault();
-                
-                if (this.blockingMode) {
-                    this.blockingMode = false;
-                    const blockButton = document.querySelector('[button_block]');
-                    if (blockButton) blockButton.classList.remove('is--add-service');
-                    
-                    const discountWrapper = document.querySelector('.input-wrap:has(#selected_discount)');
-                    if (discountWrapper) discountWrapper.style.display = '';
-                    
-                    const selectedDiscountInput = document.querySelector('#selected_discount');
-                    if (selectedDiscountInput) {
-                        selectedDiscountInput.placeholder = '';
-                        selectedDiscountInput.disabled = false;
-                    }
-                }
-                
-                this.cancelLastRange();
-            });
-        }
+     const cancelButton = document.querySelector('[calendar-choosen-cancel]');
+     if (cancelButton) {
+         cancelButton.addEventListener('click', (event) => {
+             event.preventDefault();
+             
+             if (this.blockingMode) {
+                 this.blockingMode = false;
+                 const blockButton = document.querySelector('[button_block]');
+                 if (blockButton) blockButton.classList.remove('is--add-service');
+                 
+                 const discountWrapper = document.querySelector('.input-wrap:has(#selected_discount)');
+                 if (discountWrapper) discountWrapper.style.display = '';
+                 
+                 const selectedDiscountInput = document.querySelector('#selected_discount');
+                 if (selectedDiscountInput) {
+                     selectedDiscountInput.placeholder = '';
+                     selectedDiscountInput.disabled = false;
+                 }
+             }
+             
+             if (this.unblockingMode) {
+                 this.unblockingMode = false;
+                 this.clearWaitState();
+                 this.selection.tempStart = null;
+                 this.selection.tempStartMonth = null;
+                 this.selection.tempStartYear = null;
+             }
+             
+             this.cancelLastRange();
+         });
+     }
 
-        // Weekend discount checkbox handling
-        const weekendDiscountCheckbox = document.querySelector('#Weekend-Discount, input[name="weekend_discount"][type="checkbox"]');
-        const weekendDiscountInput = document.querySelector('#weekend_discount, input[name="weekend_discount"][type="text"], input[name="Weekend-Discount"][type="text"]');
-        
-        if (weekendDiscountCheckbox && weekendDiscountInput) {
-            const toggleWeekendInput = (show) => {
-                weekendDiscountInput.style.display = show ? 'block' : 'none';
-            };
+     // Weekend discount checkbox handling
+     const weekendDiscountCheckbox = document.querySelector('#Weekend-Discount, input[name="weekend_discount"][type="checkbox"]');
+     const weekendDiscountInput = document.querySelector('#weekend_discount, input[name="weekend_discount"][type="text"], input[name="Weekend-Discount"][type="text"]');
+     
+     if (weekendDiscountCheckbox && weekendDiscountInput) {
+         const toggleWeekendInput = (show) => {
+             weekendDiscountInput.style.display = show ? 'block' : 'none';
+         };
 
-            weekendDiscountCheckbox.addEventListener('change', (event) => {
-                const isChecked = event.target.checked;
-                toggleWeekendInput(isChecked);
-                localStorage.setItem('weekendDiscountEnabled', isChecked);
-                
-                if (isChecked) {
-                    const discountPercent = parseFloat(weekendDiscountInput.value.replace(/[^\d.]/g, '')) || 0;
-                    if (discountPercent > 0) {
-                        localStorage.setItem('weekendDiscountPercent', discountPercent);
-                        this.applyWeekendDiscount(discountPercent);
-                    }
-                } else {
-                    localStorage.removeItem('weekendDiscountPercent');
-                    this.removeWeekendDiscount();
-                }
-            });
+         weekendDiscountCheckbox.addEventListener('change', (event) => {
+             const isChecked = event.target.checked;
+             toggleWeekendInput(isChecked);
+             localStorage.setItem('weekendDiscountEnabled', isChecked);
+             
+             if (isChecked) {
+                 const discountPercent = parseFloat(weekendDiscountInput.value.replace(/[^\d.]/g, '')) || 0;
+                 if (discountPercent > 0) {
+                     localStorage.setItem('weekendDiscountPercent', discountPercent);
+                     this.applyWeekendDiscount(discountPercent);
+                 }
+             } else {
+                 localStorage.removeItem('weekendDiscountPercent');
+                 this.removeWeekendDiscount();
+             }
+         });
 
-            weekendDiscountInput.addEventListener('input', (event) => {
-                let value = event.target.value;
-                let numericValue = value.replace(/[^\d.]/g, '');
-                let discountPercent = parseFloat(numericValue) || 0;
-                
-                if (value !== numericValue) {
-                    event.target.value = numericValue;
-                }
-                
-                if (discountPercent > 0) {
-                    localStorage.setItem('weekendDiscountPercent', discountPercent);
-                }
-                if (weekendDiscountCheckbox.checked && discountPercent > 0) {
-                    this.applyWeekendDiscount(discountPercent);
-                }
-                event.target.style.display = 'block';
-            });
+         weekendDiscountInput.addEventListener('input', (event) => {
+             let value = event.target.value;
+             let numericValue = value.replace(/[^\d.]/g, '');
+             let discountPercent = parseFloat(numericValue) || 0;
+             
+             if (value !== numericValue) {
+                 event.target.value = numericValue;
+             }
+             
+             if (discountPercent > 0) {
+                 localStorage.setItem('weekendDiscountPercent', discountPercent);
+             }
+             if (weekendDiscountCheckbox.checked && discountPercent > 0 && this.getDefaultCost()) {
+                 this.applyWeekendDiscount(discountPercent);
+             }
+             event.target.style.display = 'block';
+         });
 
-            weekendDiscountInput.addEventListener('blur', (event) => {
-                let value = event.target.value;
-                let numericValue = parseFloat(value);
-                
-                if (!isNaN(numericValue) && numericValue > 0 && !value.includes('%')) {
-                    event.target.value = numericValue + '%';
-                }
-                
-                if (weekendDiscountCheckbox.checked) {
-                    event.target.style.display = 'block';
-                }
-            });
-            
-            weekendDiscountInput.addEventListener('focus', (event) => {
-                let value = event.target.value;
-                if (value.includes('%')) {
-                    event.target.value = value.replace('%', ''); }
-               event.stopPropagation();
-           });
+         weekendDiscountInput.addEventListener('blur', (event) => {
+             let value = event.target.value;
+             let numericValue = parseFloat(value);
+             
+             if (!isNaN(numericValue) && numericValue > 0 && !value.includes('%')) {
+                 event.target.value = numericValue + '%';
+             }
+             
+             if (weekendDiscountCheckbox.checked) {
+                 event.target.style.display = 'block';
+             }
+         });
+         
+         weekendDiscountInput.addEventListener('focus', (event) => {
+             let value = event.target.value;
+             if (value.includes('%')) {
+                 event.target.value = value.replace('%', '');
+             }
+             event.stopPropagation();
+         });
 
-           const savedWeekendEnabled = localStorage.getItem('weekendDiscountEnabled') === 'true';
-           const savedDiscountPercent = localStorage.getItem('weekendDiscountPercent');
-           
-           if (savedWeekendEnabled) {
-               weekendDiscountCheckbox.checked = true;
-               toggleWeekendInput(true);
-               if (savedDiscountPercent) {
-                   weekendDiscountInput.value = savedDiscountPercent + '%';
-               }
-           } else {
-               toggleWeekendInput(false);
-           }
-       }
+         const savedWeekendEnabled = localStorage.getItem('weekendDiscountEnabled') === 'true';
+         const savedDiscountPercent = localStorage.getItem('weekendDiscountPercent');
+         
+         if (savedWeekendEnabled) {
+             weekendDiscountCheckbox.checked = true;
+             toggleWeekendInput(true);
+             if (savedDiscountPercent) {
+                 weekendDiscountInput.value = savedDiscountPercent + '%';
+             }
+         } else {
+             toggleWeekendInput(false);
+         }
+     }
 
-       const selectedDiscountInput = document.querySelector('#selected_discount');
-       if (selectedDiscountInput) {
-           selectedDiscountInput.addEventListener('input', (event) => {
-               let value = event.target.value;
-               let numericValue = value.replace(/[^\d.]/g, '');
-               
-               if (value !== numericValue) {
-                   event.target.value = numericValue;
-               }
-           });
-           
-           selectedDiscountInput.addEventListener('blur', (event) => {
-               let value = event.target.value;
-               let numericValue = parseFloat(value);
-               
-               if (!isNaN(numericValue) && numericValue > 0 && !value.includes('%')) {
-                   event.target.value = numericValue + '%';
-               }
-           });
-           
-           selectedDiscountInput.addEventListener('focus', (event) => {
-               let value = event.target.value;
-               if (value.includes('%')) {
-                   event.target.value = value.replace('%', '');
-               }
-           });
-       }
-   }
+     const selectedDiscountInput = document.querySelector('#selected_discount');
+     if (selectedDiscountInput) {
+         selectedDiscountInput.addEventListener('input', (event) => {
+             let value = event.target.value;
+             let numericValue = value.replace(/[^\d.]/g, '');
+             
+             if (value !== numericValue) {
+                 event.target.value = numericValue;
+             }
+         });
+         
+         selectedDiscountInput.addEventListener('blur', (event) => {
+             let value = event.target.value;
+             let numericValue = parseFloat(value);
+             
+             if (!isNaN(numericValue) && numericValue > 0 && !value.includes('%')) {
+                 event.target.value = numericValue + '%';
+             }
+         });
+         
+         selectedDiscountInput.addEventListener('focus', (event) => {
+             let value = event.target.value;
+             if (value.includes('%')) {
+                 event.target.value = value.replace('%', '');
+             }
+         });
+     }
+ }
 
-   attachBlockingHandlers() {
-       const blockButton = document.querySelector('[button_block]');
-       const chosenDatesElement = document.querySelector('[chosen-dates]');
+ attachBlockingHandlers() {
+     const blockButton = document.querySelector('[button_block]');
+     const chosenDatesElement = document.querySelector('[chosen-dates]');
 
-       if (blockButton && chosenDatesElement) {
-           blockButton.addEventListener('click', (event) => {
-               event.preventDefault();
-               this.blockingMode = true;
-               
-               const button_open = document.querySelector('[button_open]');
-               if (button_open) button_open.classList.remove('is--add-service');
-               blockButton.classList.add('is--add-service');
-               
-               const discountWrapper = document.querySelector('.input-wrap:has(#selected_discount)');
-               if (discountWrapper) discountWrapper.style.display = 'none';
-               
-               const selectedDiscountInput = document.querySelector('#selected_discount');
-               if (selectedDiscountInput) {
-                   selectedDiscountInput.placeholder = 'Block';
-                   selectedDiscountInput.disabled = true;
-               }
-           });
-       }
+     if (blockButton && chosenDatesElement) {
+         blockButton.addEventListener('click', (event) => {
+             event.preventDefault();
+             this.blockingMode = true;
+             
+             const button_open = document.querySelector('[button_open]');
+             if (button_open) button_open.classList.remove('is--add-service');
+             blockButton.classList.add('is--add-service');
+             
+             const discountWrapper = document.querySelector('.input-wrap:has(#selected_discount)');
+             if (discountWrapper) discountWrapper.style.display = 'none';
+             
+             const selectedDiscountInput = document.querySelector('#selected_discount');
+             if (selectedDiscountInput) {
+                 selectedDiscountInput.placeholder = 'Block';
+                 selectedDiscountInput.disabled = true;
+             }
+         });
+     }
 
-       const openButton = document.querySelector('[button_open]');
-       if (openButton) {
-           openButton.addEventListener('click', (event) => {
-               event.preventDefault();
-               if (this.blockingMode) {
-                   this.blockingMode = false;
-                   
-                   openButton.classList.add('is--add-service');
-                   const blockButton = document.querySelector('[button_block]');
-                   if (blockButton) blockButton.classList.remove('is--add-service');
-                   
-                   const discountWrapper = document.querySelector('.input-wrap:has(#selected_discount)');
-                   if (discountWrapper) discountWrapper.style.display = '';
-                   
-                   const selectedDiscountInput = document.querySelector('#selected_discount');
-                   if (selectedDiscountInput) {
-                       selectedDiscountInput.placeholder = '';
-                       selectedDiscountInput.disabled = false;
-                   }
-               }
-           });
-       }
-   }
+     const openButton = document.querySelector('[button_open]');
+     if (openButton) {
+         openButton.addEventListener('click', (event) => {
+             event.preventDefault();
+             if (this.blockingMode) {
+                 this.blockingMode = false;
+                 
+                 openButton.classList.add('is--add-service');
+                 const blockButton = document.querySelector('[button_block]');
+                 if (blockButton) blockButton.classList.remove('is--add-service');
+                 
+                 const discountWrapper = document.querySelector('.input-wrap:has(#selected_discount)');
+                 if (discountWrapper) discountWrapper.style.display = '';
+                 
+                 const selectedDiscountInput = document.querySelector('#selected_discount');
+                 if (selectedDiscountInput) {
+                     selectedDiscountInput.placeholder = '';
+                     selectedDiscountInput.disabled = false;
+                 }
+             }
+         });
+     }
 
-   attachClearHandlers() {
-       const clearButton = document.querySelector('[clear-dates]');
-       if (clearButton) {
-           clearButton.addEventListener('click', (event) => {
-               event.preventDefault();
-               this.clearAllData();
-           });
-       }
-   }
+     // Добавляем кнопку для разблокировки
+     const unblockButton = document.querySelector('[button_unblock]');
+     if (unblockButton) {
+         unblockButton.addEventListener('click', (event) => {
+             event.preventDefault();
+             this.unblockingMode = true;
+             this.selection.isConfirmed = true;
+             
+             // Показываем интерфейс выбора
+             this.toggleSettingsVisibility(true);
+             const chosenDatesElement = document.querySelector('[chosen-dates]');
+             if (chosenDatesElement) {
+                 chosenDatesElement.textContent = 'Select blocked dates to unblock';
+             }
+             
+             console.log('🔓 Режим разблокировки активирован');
+         });
+     }
+ }
 
-   // Fallback calendar for emergency cases
-   createFallbackCalendar() {
-       console.log('🚨 Создание резервного календаря...');
-       
-       const defaultPrice = this.getDefaultCost();
-       
-       document.querySelectorAll('[service-price]').forEach(priceEl => {
-           const dayWrapper = priceEl.closest('.calendar_day-wrapper');
-           if (dayWrapper && !dayWrapper.classList.contains('is-past') && !dayWrapper.classList.contains('not_exist')) {
-               priceEl.textContent = defaultPrice;
-           }
-       });
-       
-       console.log('✅ Резервный календарь создан');
-   }
+ attachClearHandlers() {
+     const clearButton = document.querySelector('[clear-dates]');
+     if (clearButton) {
+         clearButton.addEventListener('click', (event) => {
+             event.preventDefault();
+             this.clearAllData();
+         });
+     }
+ }
 
-   // Public methods for external use
-   getCalendarData() {
-       return {
-           basePrices: this.data.basePrices,
-           blockedDates: this.data.blockedDates,
-           dateRanges: this.data.dateRanges,
-           excludedDays: this.data.excludedDays,
-           dateDiscounts: this.data.dateDiscounts,
-           serviceId: this.serviceId,
-           isEditMode: this.isEditMode,
-           isInitialized: this.isInitialized
-       };
-   }
+ // Fallback calendar for emergency cases
+ createFallbackCalendar() {
+     console.log('🚨 Создание резервного календаря...');
+     
+     const defaultPrice = this.getDefaultCost() || 0;
+     
+     document.querySelectorAll('[service-price]').forEach(priceEl => {
+         const dayWrapper = priceEl.closest('.calendar_day-wrapper');
+         if (dayWrapper && !dayWrapper.classList.contains('is-past') && !dayWrapper.classList.contains('not_exist')) {
+             priceEl.textContent = defaultPrice;
+         }
+     });
+     
+     console.log('✅ Резервный календарь создан');
+ }
 
-   async reload() {
-       console.log('🔄 Перезагрузка календаря...');
-       try {
-           await this.loadData();
-           this.updateCalendar();
-       } catch (error) {
-           console.error('❌ Ошибка перезагрузки:', error);
-       }
-   }
+ // Public methods for external use
+ getCalendarData() {
+     return {
+         basePrices: this.data.basePrices,
+         blockedDates: this.data.blockedDates,
+         dateRanges: this.data.dateRanges,
+         excludedDays: this.data.excludedDays,
+         dateDiscounts: this.data.dateDiscounts,
+         serviceId: this.serviceId,
+         isEditMode: this.isEditMode,
+         isInitialized: this.isInitialized
+     };
+ }
 
-   setPrice(day, price) {
-       try {
-           const monthKey = this.getCurrentMonthKey();
-           if (!monthKey) return;
-           
-           const [year, month] = monthKey.split('-');
-           const dateStr = this.formatDate(day, month, year);
-           
-           if (!this.data.basePrices[monthKey]) {
-               this.data.basePrices[monthKey] = {prices: [], defaultCost: this.getDefaultCost()};
-           }
-           
-           const priceIndex = this.data.basePrices[monthKey].prices.findIndex(item => item.date === dateStr);
-           if (priceIndex !== -1) {
-               this.data.basePrices[monthKey].prices[priceIndex].price = price;
-           } else {
-               this.data.basePrices[monthKey].prices.push({date: dateStr, price: price});
-           }
-           
-           this.updateAllDaysDisplay();
-       } catch (error) {
-           console.error('❌ Ошибка установки цены:', error);
-       }
-   }
+ async reload() {
+     console.log('🔄 Перезагрузка календаря...');
+     try {
+         await this.loadData();
+         this.updateCalendar();
+     } catch (error) {
+         console.error('❌ Ошибка перезагрузки:', error);
+     }
+ }
+
+ setPrice(day, price) {
+     try {
+         const monthKey = this.getCurrentMonthKey();
+         if (!monthKey) return;
+         
+         const [year, month] = monthKey.split('-');
+         const dateStr = this.formatDate(day, month, year);
+         
+         if (!this.data.basePrices[monthKey]) {
+             this.data.basePrices[monthKey] = {prices: [], defaultCost: this.getDefaultCost()};
+         }
+         
+         const priceIndex = this.data.basePrices[monthKey].prices.findIndex(item => item.date === dateStr);
+         if (priceIndex !== -1) {
+             this.data.basePrices[monthKey].prices[priceIndex].price = price;
+         } else {
+             this.data.basePrices[monthKey].prices.push({date: dateStr, price: price});
+         }
+         
+         this.updateAllDaysDisplay();
+     } catch (error) {
+         console.error('❌ Ошибка установки цены:', error);
+     }
+ }
 }
 
 // Initialization
 document.addEventListener('DOMContentLoaded', () => {
-   console.log('🚀 Запуск Enhanced Calendar Manager...');
-   
-   try {
-       window.calendarManager = new FixedCalendarManager();
-       
-       // API interface
-       window.calendarAPI = {
-           getManager: () => window.calendarManager,
-           getStatus: () => window.calendarManager.getCalendarData(),
-           reload: () => window.calendarManager.reload(),
-           saveToDatabase: () => window.calendarManager.saveToDatabase(),
-           setPrice: (day, price) => window.calendarManager.setPrice(day, price),
-           setDefaultCost: (cost) => {
-               window.calendarManager.data.globalSettings.defaultCost = cost;
-               const costInput = window.calendarManager.getCostInput();
-               if (costInput) costInput.value = cost;
-               window.calendarManager.updateAllDaysDisplay();
-           },
-           clearAllData: () => window.calendarManager.clearAllData(),
-           fixPrices: () => {
-               const defaultPrice = window.calendarManager.getDefaultCost();
-               document.querySelectorAll('[service-price]').forEach(priceEl => {
-                   const dayWrapper = priceEl.closest('.calendar_day-wrapper');
-                   if (dayWrapper && !dayWrapper.classList.contains('is-past') && !dayWrapper.classList.contains('not_exist')) {
-                       priceEl.textContent = defaultPrice;
-                   }
-               });
-               console.log(`✅ Цены исправлены на ${defaultPrice}`);
-           }
-       };
-       
-       console.log('🛠️ API доступен в window.calendarAPI');
-       console.log('📋 Доступные методы:');
-       console.log('- calendarAPI.getStatus() - получить текущее состояние');
-       console.log('- calendarAPI.reload() - перезагрузить календарь');
-       console.log('- calendarAPI.saveToDatabase() - сохранить в БД');
-       console.log('- calendarAPI.setPrice(day, price) - установить цену для дня');
-       console.log('- calendarAPI.setDefaultCost(cost) - установить базовую цену');
-       console.log('- calendarAPI.clearAllData() - очистить все выбранные даты');
-       console.log('- calendarAPI.fixPrices() - исправить все цены на базовую');
-       
-   } catch (error) {
-       console.error('❌ Критическая ошибка инициализации:', error);
-       
-       // Create minimal fallback
-       window.calendarAPI = {
-           fixPrices: () => {
-               const costInput = document.querySelector('#cost_per_show');
-               const defaultPrice = costInput && costInput.value ? parseInt(costInput.value) : 8000;
-               
-               document.querySelectorAll('[service-price]').forEach(priceEl => {
-                   const dayWrapper = priceEl.closest('.calendar_day-wrapper');
-                   if (dayWrapper && !dayWrapper.classList.contains('is-past') && !dayWrapper.classList.contains('not_exist')) {
-                       priceEl.textContent = defaultPrice;
-                   }
-               });
-               console.log(`✅ Экстренное исправление цен: ${defaultPrice}`);
-           },
-           clearAllData: () => {
-               console.log('⚠️ Функция очистки недоступна в режиме fallback');
-           }
-       };
-       
-       // Auto-fix prices
-       setTimeout(() => {
-           window.calendarAPI.fixPrices();
-       }, 1000);
-   }
+ console.log('🚀 Запуск Enhanced Calendar Manager...');
+ 
+ try {
+     window.calendarManager = new FixedCalendarManager();
+     
+     // API interface
+     window.calendarAPI = {
+         getManager: () => window.calendarManager,
+         getStatus: () => window.calendarManager.getCalendarData(),
+         reload: () => window.calendarManager.reload(),
+         saveToDatabase: () => window.calendarManager.saveToDatabase(),
+         setPrice: (day, price) => window.calendarManager.setPrice(day, price),
+         setDefaultCost: (cost) => {
+             window.calendarManager.data.globalSettings.defaultCost = cost;
+             const costInput = window.calendarManager.getCostInput();
+             if (costInput) costInput.value = cost;
+             window.calendarManager.updateAllDaysDisplay();
+         },
+         clearAllData: () => window.calendarManager.clearAllData(),
+         fixPrices: () => {
+             const defaultPrice = window.calendarManager.getDefaultCost();
+             if (!defaultPrice) {
+                 console.warn('⚠️ Не могу исправить цены: базовая цена не установлена');
+                 return;
+             }
+             document.querySelectorAll('[service-price]').forEach(priceEl => {
+                 const dayWrapper = priceEl.closest('.calendar_day-wrapper');
+                 if (dayWrapper && !dayWrapper.classList.contains('is-past') && !dayWrapper.classList.contains('not_exist')) {
+                     priceEl.textContent = defaultPrice;
+                 }
+             });
+             console.log(`✅ Цены исправлены на ${defaultPrice}`);
+         },
+         applyWeekendDiscount: (percent) => {
+             if (!window.calendarManager.getDefaultCost()) {
+                 console.warn('⚠️ Установите базовую цену перед применением скидки');
+                 return;
+             }
+             localStorage.setItem('weekendDiscountEnabled', 'true');
+             localStorage.setItem('weekendDiscountPercent', percent);
+             window.calendarManager.applyWeekendDiscount(percent);
+         },
+         removeWeekendDiscount: () => {
+             localStorage.removeItem('weekendDiscountEnabled');
+             localStorage.removeItem('weekendDiscountPercent');
+             window.calendarManager.removeWeekendDiscount();
+         }
+     };
+     
+     console.log('🛠️ API доступен в window.calendarAPI');
+     console.log('📋 Доступные методы:');
+     console.log('- calendarAPI.getStatus() - получить текущее состояние');
+     console.log('- calendarAPI.reload() - перезагрузить календарь');
+     console.log('- calendarAPI.saveToDatabase() - сохранить в БД');
+     console.log('- calendarAPI.setPrice(day, price) - установить цену для дня');
+     console.log('- calendarAPI.setDefaultCost(cost) - установить базовую цену');
+     console.log('- calendarAPI.clearAllData() - очистить все выбранные даты');
+     console.log('- calendarAPI.fixPrices() - исправить все цены на базовую');
+     console.log('- calendarAPI.applyWeekendDiscount(percent) - применить скидку выходного дня');
+     console.log('- calendarAPI.removeWeekendDiscount() - удалить скидку выходного дня');
+     
+ } catch (error) {
+     console.error('❌ Критическая ошибка инициализации:', error);
+     
+     // Create minimal fallback
+     window.calendarAPI = {
+         fixPrices: () => {
+             const costInput = document.querySelector('#cost_per_show');
+             const defaultPrice = costInput && costInput.value ? parseInt(costInput.value) : 0;
+             
+             if (!defaultPrice) {
+                 console.warn('⚠️ Установите цену в поле cost_per_show');
+                 return;
+             }
+             
+             document.querySelectorAll('[service-price]').forEach(priceEl => {
+                 const dayWrapper = priceEl.closest('.calendar_day-wrapper');
+                 if (dayWrapper && !dayWrapper.classList.contains('is-past') && !dayWrapper.classList.contains('not_exist')) {
+                     priceEl.textContent = defaultPrice;
+                 }
+             });
+             console.log(`✅ Экстренное исправление цен: ${defaultPrice}`);
+         },
+         clearAllData: () => {
+             console.log('⚠️ Функция очистки недоступна в режиме fallback');
+         }
+     };
+ }
 });
