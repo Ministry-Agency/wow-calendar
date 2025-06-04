@@ -27,19 +27,27 @@ class CalendarManager {
         this.supabaseClient = null;
         this.serviceId = null;
         this.dbCalendarData = new Map(); // Store calendar data from DB
+        this.isEditMode = false;
         
         this.init();
     }
 
-    async init() {
+    init() {
         this.addStyles();
         this.setCurrentDate();
-        await this.initializeSupabase();
-        await this.detectEditMode();
+        
+        // Initialize Supabase and detect edit mode
+        this.initializeSupabase();
+        this.detectEditMode();
         
         setTimeout(async () => {
             this.loadGlobalSettings();
-            await this.loadCalendarFromDB();
+            
+            // Load calendar data if in edit mode
+            if (this.isEditMode && this.supabaseClient && this.serviceId) {
+                await this.loadCalendarFromDB();
+            }
+            
             this.updateCalendar();
             this.attachEventHandlers();
             this.updatePrevMonthButtonState();
@@ -60,21 +68,31 @@ class CalendarManager {
                     }
                 }
             }
+            
+            // Enable price editing if in edit mode
+            if (this.isEditMode) {
+                this.enablePriceEditing();
+                console.log('Calendar in edit mode - price editing enabled. Double-click on prices to edit.');
+            }
         }, 100);
     }
 
-    async initializeSupabase() {
+    initializeSupabase() {
         if (typeof supabase === "undefined") {
             console.warn('Supabase not available');
             return;
         }
 
-        const SUPABASE_URL = 'https://jymaupdlljtwjxiiistn.supabase.co';
-        const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp5bWF1cGRsbGp0d2p4aWlpc3RuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Mzg5MTcxMTgsImV4cCI6MjA1NDQ5MzExOH0.3K22PNYIHh8NCreiG0NBtn6ITFrL3cVmSS5KCG--niY';
-        this.supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        try {
+            const SUPABASE_URL = 'https://jymaupdlljtwjxiiistn.supabase.co';
+            const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp5bWF1cGRsbGp0d2p4aWlpc3RuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Mzg5MTcxMTgsImV4cCI6MjA1NDQ5MzExOH0.3K22PNYIHh8NCreiG0NBtn6ITFrL3cVmSS5KCG--niY';
+            this.supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        } catch (error) {
+            console.error('Error initializing Supabase:', error);
+        }
     }
 
-    async detectEditMode() {
+    detectEditMode() {
         // Try to detect service ID from URL parameters or form
         const urlParams = new URLSearchParams(window.location.search);
         this.serviceId = urlParams.get('service_id') || urlParams.get('id');
@@ -97,12 +115,13 @@ class CalendarManager {
             }
         }
 
-        console.log('Detected service ID:', this.serviceId);
+        this.isEditMode = !!this.serviceId;
+        console.log('Edit mode:', this.isEditMode, 'Service ID:', this.serviceId);
     }
 
     async loadCalendarFromDB() {
         if (!this.supabaseClient || !this.serviceId) {
-            console.log('No Supabase client or service ID available');
+            console.log('Cannot load from DB: missing Supabase client or service ID');
             return;
         }
 
@@ -168,10 +187,15 @@ class CalendarManager {
                         if (!this.data.blockedDates[monthKey]) {
                             this.data.blockedDates[monthKey] = [];
                         }
-                        this.data.blockedDates[monthKey].push({
-                            date: dateStr,
-                            price: 0
+                        const existingBlock = this.data.blockedDates[monthKey].find(item => {
+                            return (typeof item === 'object' && item.date) ? item.date === dateStr : item === dateStr;
                         });
+                        if (!existingBlock) {
+                            this.data.blockedDates[monthKey].push({
+                                date: dateStr,
+                                price: 0
+                            });
+                        }
                     }
                 });
                 
@@ -201,16 +225,30 @@ class CalendarManager {
                 const [year, month] = monthKey.split('-');
                 const monthData = this.data.basePrices[monthKey];
                 
-                monthData.prices.forEach(priceEntry => {
-                    const [day, monthPart, yearPart] = priceEntry.date.split('.');
-                    const dbDate = `${yearPart}-${monthPart}-${day}`; // Convert to YYYY-MM-DD format
-                    
+                if (monthData && monthData.prices) {
+                    monthData.prices.forEach(priceEntry => {
+                        const [day, monthPart, yearPart] = priceEntry.date.split('.');
+                        const dbDate = `${yearPart}-${monthPart}-${day}`; // Convert to YYYY-MM-DD format
+                        
+                        calendarEntries.push({
+                            service_id: parseInt(this.serviceId),
+                            date: dbDate,
+                            price: priceEntry.price || 0
+                        });
+                    });
+                }
+            });
+
+            // Also add any DB data that might not be in basePrices
+            this.dbCalendarData.forEach((data, dbDate) => {
+                const exists = calendarEntries.some(entry => entry.date === dbDate);
+                if (!exists) {
                     calendarEntries.push({
                         service_id: parseInt(this.serviceId),
                         date: dbDate,
-                        price: priceEntry.price || 0
+                        price: data.price || 0
                     });
-                });
+                }
             });
 
             if (calendarEntries.length === 0) {
@@ -407,8 +445,11 @@ class CalendarManager {
         }
         
         // Also save to database if in edit mode
-        if (this.serviceId) {
-            this.saveCalendarToDB();
+        if (this.isEditMode && this.serviceId) {
+            // Use setTimeout to avoid blocking UI
+            setTimeout(() => {
+                this.saveCalendarToDB();
+            }, 100);
         }
     }
 
@@ -882,8 +923,10 @@ class CalendarManager {
         localStorage.removeItem('weekendDiscountPercent');
 
         // Clear from database if in edit mode
-        if (this.serviceId) {
-            this.saveCalendarToDB();
+        if (this.isEditMode && this.serviceId) {
+            setTimeout(() => {
+                this.saveCalendarToDB();
+            }, 100);
         }
 
         this.updateCalendar();
@@ -1627,14 +1670,6 @@ class CalendarManager {
 // Auto-initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
     window.calendarManager = new CalendarManager();
-    
-    // Enable price editing if in edit mode
-    setTimeout(() => {
-        if (window.calendarManager.serviceId) {
-            window.calendarManager.enablePriceEditing();
-            console.log('Calendar in edit mode - price editing enabled. Double-click on prices to edit.');
-        }
-    }, 1000);
 });
 
 // Export function for form integration
@@ -1649,9 +1684,13 @@ window.getCalendarData = function() {
 window.setServiceId = function(serviceId) {
     if (window.calendarManager) {
         window.calendarManager.serviceId = serviceId;
-        window.calendarManager.loadCalendarFromDB().then(() => {
-            window.calendarManager.updateCalendar();
-        });
+        window.calendarManager.isEditMode = !!serviceId;
+        if (serviceId) {
+            window.calendarManager.loadCalendarFromDB().then(() => {
+                window.calendarManager.updateCalendar();
+                window.calendarManager.enablePriceEditing();
+            });
+        }
     }
 };
 </script>
