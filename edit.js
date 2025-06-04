@@ -107,10 +107,8 @@
         }
 
         isDateBlocked(dateStr, monthKey) {
-            if (this.data.supabasePrices[dateStr] === null || 
-                this.data.supabasePrices[dateStr] === undefined ||
-                this.data.supabasePrices[dateStr] === 0) {
-                return true;
+            if (this.data.supabasePrices.hasOwnProperty(dateStr)) {
+                return this.data.supabasePrices[dateStr] === 0;
             }
             
             if (!this.data.blockedDates[monthKey]) return false;
@@ -148,12 +146,13 @@
                 const date = this.formatDate(day, month, year);
                 const isPast = this.isPastDate(date);
                 
+                const hasSupabasePrice = this.data.supabasePrices.hasOwnProperty(date);
                 const supabasePrice = this.data.supabasePrices[date];
-                const isBlocked = supabasePrice === null || supabasePrice === undefined || supabasePrice === 0;
+                const isBlocked = hasSupabasePrice && supabasePrice === 0;
                 
                 dayWrapper.classList.toggle('is-past', isPast);
                 dayWrapper.classList.toggle('is-blocked', isBlocked);
-                dayWrapper.classList.toggle('is-available', !isPast && !isBlocked && supabasePrice > 0);
+                dayWrapper.classList.toggle('is-available', !isPast && !isBlocked && hasSupabasePrice && supabasePrice > 0);
 
                 let finalPrice;
                 if (isPast) {
@@ -163,7 +162,7 @@
                     servicePriceElement.textContent = 'Blocked';
                     servicePriceElement.style.fontSize = '12px';
                     return;
-                } else if (supabasePrice > 0) {
+                } else if (hasSupabasePrice && supabasePrice > 0) {
                     if (weekendDiscountEnabled && discountPercent > 0 && this.isWeekend(date)) {
                         finalPrice = this.applyDiscount(supabasePrice, discountPercent);
                         dayWrapper.classList.add('is-weekend-discount');
@@ -171,7 +170,7 @@
                         finalPrice = supabasePrice;
                         dayWrapper.classList.remove('is-weekend-discount');
                     }
-                } else {
+                } else if (!hasSupabasePrice) {
                     finalPrice = defaultCost;
                     dayWrapper.classList.remove('is-weekend-discount');
                 }
@@ -202,15 +201,16 @@
                 const dateStr = this.formatDate(day, this.monthMap[monthName], year);
                 const timestamp = fullDate.timestamp;
 
+                const hasSupabasePrice = this.data.supabasePrices.hasOwnProperty(dateStr);
                 const supabasePrice = this.data.supabasePrices[dateStr];
                 const isInRange = this.isDateInRanges(fullDate);
                 const isExcluded = this.data.excludedDays.has(timestamp);
                 const isPast = this.isPastOrCurrentDate(fullDate);
-                const isBlocked = supabasePrice === null || supabasePrice === undefined || supabasePrice === 0;
+                const isBlocked = hasSupabasePrice && supabasePrice === 0;
 
                 dayWrapper.classList.toggle('is-past', isPast);
                 dayWrapper.classList.toggle('is-blocked', isBlocked);
-                dayWrapper.classList.toggle('is-available', !isPast && !isBlocked && supabasePrice > 0);
+                dayWrapper.classList.toggle('is-available', !isPast && !isBlocked && hasSupabasePrice && supabasePrice > 0);
                 
                 if (isPast || isBlocked) {
                     dayWrapper.classList.remove('is-selected', 'is-wait', 'is-active');
@@ -234,7 +234,7 @@
                     } else if (this.data.dateDiscounts[timestamp] !== undefined) {
                         servicePriceElement.textContent = this.data.dateDiscounts[timestamp];
                         servicePriceElement.style.fontSize = '';
-                    } else if (supabasePrice > 0) {
+                    } else if (hasSupabasePrice && supabasePrice > 0) {
                         let finalPrice = supabasePrice;
                         if (weekendDiscountEnabled && discountPercent > 0 && this.isWeekend(dateStr)) {
                             finalPrice = this.applyDiscount(supabasePrice, discountPercent);
@@ -244,7 +244,7 @@
                         }
                         servicePriceElement.textContent = finalPrice;
                         servicePriceElement.style.fontSize = '';
-                    } else {
+                    } else if (!hasSupabasePrice) {
                         servicePriceElement.textContent = basePrice;
                         servicePriceElement.style.fontSize = '';
                         dayWrapper.classList.remove('is-weekend-discount');
